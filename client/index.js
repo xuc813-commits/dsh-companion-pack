@@ -1,0 +1,614 @@
+/**
+ * dsh-world — 浏览器半侧：设置里的「世界控制台」。
+ * 模块 id 必须等于 bundle 行名 dsh-world；数据来自宿主半侧的 /dsh-world/console/* 路由。
+ * 读取是 GET；会改变东西的（开始、停止、人设、世界提示词、额度、记忆轮数）是带 x-dsh-world 头的 JSON POST。
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-companion-coordinator',
+  factory: (require) => {
+    var react = require('react')
+    var h = react.createElement
+    var useState = react.useState
+    var useEffect = react.useEffect
+    var useRef = react.useRef
+
+    function settle(r) {
+      return r.json().then(function (body) { return { body: body } }, function () { return null }).then(function (parsed) {
+        var body = parsed && parsed.body
+        if (!r.ok) { var err = new Error((body && body.error) || ('HTTP ' + r.status)); err.status = r.status; throw err }
+        if (!parsed) { var bad = new Error('回复不是 JSON'); bad.notJson = true; throw bad }
+        return body
+      })
+    }
+    var activeId = ''
+    function endpoint() { return '/roleplay/' + activeId }
+    function api(path) { return fetch(endpoint() + '/dsh-world/console/' + path, { cache: 'no-store' }).then(settle) }
+    function post(path, body) {
+      return fetch(endpoint() + '/dsh-world/console/' + path, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-dsh-world': '1' }, body: JSON.stringify(body || {}) }).then(settle)
+    }
+    /** QQ 那几扇门在自己的前缀下（/dsh-world/qq/*），不和 console 混在一起。 */
+    function qqGet(path) { return fetch(endpoint() + '/dsh-world/qq/' + path, { cache: 'no-store' }).then(settle) }
+    function qqPost(path, body) {
+      return fetch(endpoint() + '/dsh-world/qq/' + path, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-dsh-world': '1' }, body: JSON.stringify(body || {}) }).then(settle)
+    }
+    /** 快照，或 null 表示控制台不在（404、不是 JSON 的页面、没有 life 字段的回复）。 */
+    function loadSnapshot() {
+      return api('snapshot').then(function (s) {
+        return s && typeof s === 'object' && typeof s.life === 'object' ? s : null
+      }, function (e) { if (e && (e.status === 404 || e.notJson)) return null; throw e })
+    }
+    function clock(iso, zone) {
+      try { return new Date(iso).toLocaleTimeString('zh-CN', { timeZone: zone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' }) } catch (e) { return String(iso) }
+    }
+    function local(iso, zone) {
+      if (!iso) return '—'
+      try { return new Date(iso).toLocaleString('zh-CN', { timeZone: zone, hourCycle: 'h23', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } catch (e) { return iso }
+    }
+    function remaining(iso) {
+      var ms = Date.parse(iso) - Date.now()
+      if (!(ms > 0)) return '马上'
+      var m = Math.round(ms / 60000), d = Math.floor(m / 1440), hr = Math.floor(m % 1440 / 60), mi = m % 60
+      return (d ? d + ' 天 ' : '') + (hr ? hr + ' 小时 ' : '') + mi + ' 分'
+    }
+    function list(value) { return Array.isArray(value) ? value : [] }
+    var sourceLabel = { first: '新家', return: '回来', plan: '闹钟', fallback: '早上兜底', review: '回顾' }
+    var statusLabel = { running: '正在做事', idle: '空闲', cold: '休息中' }
+
+    var LAYERS = [{key:'名字',rows:1},{key:'她是谁',rows:3}]
+    /** 和宿主半侧 renderPersona 一样拼：她读到的就是这段。 */
+    function renderPersona(p) {
+      var opening = (p['名字'] ? '我是' + p['名字'] + '。' : '') + (p['她是谁'] || '')
+      var parts = [opening]
+      ;['性格', '说话方式', '愿景'].forEach(function (k) { if (p[k]) parts.push('# ' + k + '\n' + p[k]) })
+      parts.push(p['补充'] || '')
+      return parts.filter(Boolean).join('\n\n')
+    }
+
+    var CSS = [
+      '.dw{--ink:var(--dsw-alias-label-primary,#2a2620);--soft:var(--dsw-alias-label-tertiary,#8b8475);--gold:#c49a52;',
+      '--line:color-mix(in srgb,currentColor 13%,transparent);--paper:color-mix(in srgb,currentColor 3.5%,transparent);',
+      '--glow:color-mix(in srgb,var(--gold) 22%,transparent);--warn:#c4553a;--serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif;',
+      'max-width:780px;display:flex;flex-direction:column;gap:18px;font-size:13px;line-height:1.65;color:var(--ink)}',
+      '.dw *{box-sizing:border-box}',
+      '.dw-head{position:relative;display:flex;align-items:flex-end;gap:16px;padding:18px 20px 16px;border:1px solid var(--line);border-radius:14px;',
+      'background:radial-gradient(120% 140% at 100% 0%,var(--glow),transparent 55%),var(--paper);overflow:hidden}',
+      '.dw-head:after{content:"";position:absolute;left:20px;right:20px;bottom:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.55}',
+      '.dw-title{flex:1;min-width:0}.dw-title small{display:block;letter-spacing:.24em;font-size:10px;text-transform:uppercase;color:var(--soft)}',
+      '.dw-title h2{margin:2px 0 0;font:600 24px/1.25 var(--serif);letter-spacing:.04em}',
+      '.dw-state{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--soft);margin-top:6px}',
+      '.dw-dot{width:8px;height:8px;border-radius:50%;background:var(--soft);opacity:.6}',
+      '.dw-on .dw-dot{background:var(--gold);opacity:1;box-shadow:0 0 0 0 var(--glow);animation:dw-breathe 2.6s ease-in-out infinite}',
+      '@keyframes dw-breathe{0%,100%{box-shadow:0 0 0 0 var(--glow)}50%{box-shadow:0 0 0 7px transparent}}',
+      '.dw-power{font:600 13px var(--serif);letter-spacing:.2em;padding:9px 20px 9px 22px;border-radius:999px;cursor:pointer;transition:transform .15s,box-shadow .2s,background .2s;',
+      'border:1px solid var(--gold);background:var(--gold);color:#fffaf0;box-shadow:0 6px 18px -8px var(--gold)}',
+      '.dw-power:hover{transform:translateY(-1px);box-shadow:0 10px 22px -8px var(--gold)}',
+      '.dw-power.stop{background:transparent;color:var(--ink);border-color:var(--line);box-shadow:none}.dw-power.stop:hover{border-color:var(--warn);color:var(--warn)}',
+      '.dw-power:disabled{opacity:.5;cursor:default;transform:none}',
+      '.dw-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 6px}',
+      '.dw-tab{position:relative;font:500 13px var(--serif);letter-spacing:.12em;padding:8px 14px 10px;background:none;border:0;color:var(--soft);cursor:pointer}',
+      '.dw-tab:after{content:"";position:absolute;left:50%;right:50%;bottom:-1px;height:2px;background:var(--gold);transition:left .25s,right .25s}',
+      '.dw-tab.on{color:var(--ink)}.dw-tab.on:after{left:12px;right:12px}',
+      '.dw-pane{display:flex;flex-direction:column;gap:14px}',
+      '.dw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}',
+      '.dw-card{min-width:0;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--paper);animation:dw-rise .45s both}',
+      '@keyframes dw-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}',
+      '.dw-card h4{margin:0 0 10px;font:600 13px var(--serif);letter-spacing:.14em;display:flex;align-items:center;gap:8px}',
+      '.dw-card h4:before{content:"";width:14px;height:1px;background:var(--gold)}',
+      '.dw-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px}.dw-kv dt{color:var(--soft);white-space:nowrap}.dw-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}',
+      '.dw-big{font:600 20px/1.2 var(--serif)}.dw-muted{color:var(--soft)}.dw-bad{color:var(--warn)}.dw-ok{color:var(--gold)}',
+      '.dw-quote{border-left:2px solid var(--gold);padding:2px 0 2px 10px;margin:8px 0 0;font-family:var(--serif)}',
+      '.dw-meter{height:4px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0 4px}.dw-meter i{display:block;height:100%;background:linear-gradient(90deg,var(--gold),color-mix(in srgb,var(--gold) 55%,#fff))}',
+      '.dw-trail{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:4px}.dw-trail span{display:inline-flex;align-items:center;gap:6px}.dw-trail span:before{content:"";width:5px;height:5px;border-radius:50%;background:var(--gold)}',
+      '.dw-welcome{text-align:center;padding:30px 20px}.dw-welcome h3{font:600 20px var(--serif);margin:0 0 8px;letter-spacing:.06em}',
+      '.dw-steps{display:inline-flex;flex-direction:column;gap:6px;text-align:left;margin-top:12px;counter-reset:s}',
+      '.dw-steps li{list-style:none;counter-increment:s;display:flex;gap:10px}.dw-steps li:before{content:counter(s);font:600 12px var(--serif);color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:20px;height:20px;display:inline-grid;place-items:center;flex:none}',
+      '.dw-layer{display:grid;grid-template-columns:96px 1fr;gap:4px 16px;padding:14px 0;border-bottom:1px dashed var(--line)}',
+      '.dw-layer:last-child{border-bottom:0}.dw-layer label{font:600 14px var(--serif);letter-spacing:.1em;padding-top:6px}',
+      '.dw-layer small{grid-column:2;color:var(--soft);font-size:11.5px}',
+      '.dw textarea,.dw input[type=text]{width:100%;font:inherit;color:inherit;background:color-mix(in srgb,currentColor 2%,transparent);border:1px solid var(--line);border-radius:8px;padding:8px 10px;resize:vertical;transition:border-color .2s,box-shadow .2s}',
+      '.dw textarea:focus,.dw input[type=text]:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px var(--glow)}',
+      '.dw input.dw-name{font:600 18px var(--serif);letter-spacing:.06em}',
+      '.dw-code{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:12px;line-height:1.6;min-height:340px}',
+      '.dw-bar{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;padding:10px 0 2px;background:linear-gradient(transparent,var(--dsw-alias-background-primary,transparent) 40%)}',
+      '.dw-btn{flex-shrink:0;white-space:nowrap;font:inherit;cursor:pointer;border:1px solid var(--line);background:transparent;color:inherit;border-radius:8px;padding:6px 14px;transition:border-color .2s,background .2s}',
+      '.dw-btn:hover{border-color:var(--gold)}.dw-btn.primary{background:var(--gold);border-color:var(--gold);color:#fffaf0}.dw-btn:disabled{opacity:.45;cursor:default}',
+      '.dw-preview{white-space:pre-wrap;font-family:var(--serif);font-size:12.5px;margin:0;max-height:260px;overflow:auto}',
+      '.dw-chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--soft)}',
+      '.dw table{width:100%;border-collapse:collapse}.dw td{padding:3px 6px;vertical-align:top;border-bottom:1px solid color-mix(in srgb,currentColor 6%,transparent)}',
+      '.dw-activity{table-layout:fixed}.dw-activity td{overflow:hidden;overflow-wrap:anywhere}.dw-activity td:first-child{white-space:nowrap}',
+      '.dw-clamp{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:12px}',
+      '.dw-setting{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}.dw-setting input[type=text]{flex:1 1 120px;max-width:200px;min-width:0}',
+      '.dw-setting select{flex:1 1 140px;max-width:100%;min-width:0}',
+      '.dw pre.dw-diary{white-space:pre-wrap;margin:10px 0 0;font-family:var(--serif)}',
+      '.dw select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:6px;padding:2px 6px}',
+      '.dw-manager>.dw-card>input,.dw-manager>.dw-card>select{display:block;width:100%;max-width:100%;padding:7px 10px;margin:10px 0;font:inherit;color:inherit;background:var(--paper);border:1px solid var(--line);border-radius:7px}.dw-manager>.dw-card>label{display:flex;align-items:center;gap:8px;margin-top:12px}.dw-manager>.dw-card>.dw-btn{margin:4px 8px 4px 0}.dw-manager .dw-head small{overflow-wrap:anywhere}',
+      '@media (prefers-reduced-motion:reduce){.dw *{animation:none!important;transition:none!important}}',
+    ].join('')
+    function ensureStyle() {
+      if (document.getElementById('dsh-world-console-style')) return
+      var tag = document.createElement('style'); tag.id = 'dsh-world-console-style'; tag.textContent = CSS; document.head.appendChild(tag)
+    }
+
+    function Card(props) {
+      return h('section', { className: 'dw-card', style: { animationDelay: (props.delay || 0) + 'ms' } }, props.title ? h('h4', null, props.title) : null, props.children)
+    }
+    function KV(rows) {
+      return h('dl', { className: 'dw-kv' }, rows.filter(Boolean).map(function (row, i) { return [h('dt', { key: 'k' + i }, row[0]), h('dd', { key: 'v' + i }, row[1])] }))
+    }
+
+    function Activity(props) {
+      var days = props.days, zone = props.zone
+      var dayState = useState(days[0] || ''), day = dayState[0], setDay = dayState[1]
+      var outsideState = useState(false), outside = outsideState[0], setOutside = outsideState[1]
+      var rowsState = useState([]), rows = rowsState[0], setRows = rowsState[1]
+      var errState = useState(null), err = errState[0], setErr = errState[1]
+      useEffect(function () {
+        if (!day) return
+        var alive = true
+        api('activity?day=' + encodeURIComponent(day) + (outside ? '&outside=1' : '')).then(
+          function (r) { if (alive) { setRows(r); setErr(null) } },
+          function (e) { if (alive) { setRows([]); setErr(String(e.message || e)) } })
+        return function () { alive = false }
+      }, [day, outside, props.tick])
+      return h(Card, { title: '活动记录' },
+        days.length === 0 ? h('div', { className: 'dw-muted' }, '还没有活动记录') : h('div', null,
+          h('select', { value: day, onChange: function (e) { setDay(e.target.value) } }, days.map(function (d) { return h('option', { key: d, value: d }, d) })),
+          ' ', h('label', { className: 'dw-muted' }, h('input', { type: 'checkbox', checked: outside, onChange: function (e) { setOutside(e.target.checked) } }), ' 只看房间外'),
+          err ? h('div', { className: 'dw-bad' }, '读取失败：' + err) : null,
+          h('table', { className: 'dw-activity' },
+            h('colgroup', null, h('col', { style: { width: 48 } }), h('col', { style: { width: '22%' } }), h('col'), h('col', { style: { width: 40 } }), h('col', { style: { width: 64 } })),
+            h('tbody', null, rows.map(function (r) {
+            return h('tr', { key: r.callId + r.time }, h('td', { className: 'dw-muted' }, clock(r.time, zone)), h('td', null, r.tool), h('td', { title: r.summary }, h('div', { className: 'dw-clamp' }, r.summary)), h('td', { className: 'dw-bad' }, r.status === 'error' ? '失败' : ''), h('td', { className: r.outside ? 'dw-bad' : 'dw-muted' }, (r.gapBefore ? '（此前有缺口）' : '') + (r.outside ? '房间外' : '')))
+          })))))
+    }
+    function Diary(props) {
+      var openState = useState(null), open = openState[0], setOpen = openState[1]
+      var textState = useState(''), text = textState[0], setText = textState[1]
+      var errState = useState(null), err = errState[0], setErr = errState[1]
+      var wanted = useRef(null)
+      function show(date) {
+        wanted.current = date; setOpen(date); setText(''); setErr(null)
+        api('diary?date=' + encodeURIComponent(date)).then(
+          function (b) { if (wanted.current === date) setText(String(b.text || '')) },
+          function (e) { if (wanted.current === date) setErr(String(e.message || e)) })
+      }
+      return h(Card, { title: '日记' },
+        props.dates.length === 0 ? h('div', { className: 'dw-muted' }, '还没有日记') : h('div', null,
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } }, props.dates.map(function (d) { return h('button', { key: d, className: 'dw-btn' + (open === d ? ' primary' : ''), onClick: function () { show(d) } }, d) })),
+          err ? h('div', { className: 'dw-bad' }, '读取失败：' + err) : null,
+          open && !err ? h('pre', { className: 'dw-diary' }, text) : null))
+    }
+
+    /** 她的相册：keep_photo 留下的照片，和她当时写的话。照片点开才去取字节。 */
+    /** 分层人设：每层一张卡，右边是她实际读到的样子。 */
+    function PersonaEditor(props) {
+      var state = useState(null), persona = state[0], setPersona = state[1]
+      var savedState = useState(null), saved = savedState[0], setSaved = savedState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      var busyState = useState(false), busy = busyState[0], setBusy = busyState[1]
+      useEffect(function () {
+        api('prompts').then(function (b) { setPersona(b.persona); setSaved(b.persona) }, function (e) { setMsg('读取失败：' + (e.message || e)) })
+      }, [])
+      if (!persona) return h('div', { className: 'dw-muted' }, msg || '读取中…')
+      var dirty = JSON.stringify(persona) !== JSON.stringify(saved)
+      function set(key, value) { var next = Object.assign({}, persona); next[key] = value; setPersona(next); setMsg('') }
+      function save() {
+        setBusy(true)
+        post('persona', persona).then(function () { setSaved(persona); setMsg('已保存'); if (props.onSaved) props.onSaved() },
+          function (e) { setMsg('保存失败：' + (e.message || e)) }).then(function () { setBusy(false) })
+      }
+      var preview = renderPersona(persona)
+      return h('div', { className: 'dw-pane' },
+        h(Card, { title: '她是谁' }, LAYERS.map(function (layer) {
+          var common = { id: 'dw-' + layer.key, value: persona[layer.key] || '', onChange: function (e) { set(layer.key, e.target.value) } }
+          return h('div', { className: 'dw-layer', key: layer.key },
+            h('label', { htmlFor: common.id }, layer.key),
+            layer.rows === 1 ? h('input', Object.assign({ type: 'text', className: 'dw-name', placeholder: '比如：鲸鲸' }, common)) : h('textarea', Object.assign({ rows: layer.rows }, common)),
+            null)
+        })),
+        h('div', { className: 'dw-bar' },
+          h('button', { className: 'dw-btn primary', disabled: !dirty || busy, onClick: save }, busy ? '保存中…' : '保存人设'),
+          h('span', { className: msg.indexOf('失败') >= 0 ? 'dw-bad' : 'dw-muted' }, msg || (dirty ? '有改动还没保存' : ''))))
+    }
+    /** 世界提示词模板：自己的一份，或插件自带的。 */
+    function PromptEditor() {
+      var state = useState(null), prompt = state[0], setPrompt = state[1]
+      var textState = useState(''), text = textState[0], setText = textState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      function load() { api('prompts').then(function (b) { setPrompt(b.worldPrompt); setText(b.worldPrompt.text) }, function (e) { setMsg('读取失败：' + (e.message || e)) }) }
+      useEffect(load, [])
+      if (!prompt) return h('div', { className: 'dw-muted' }, msg || '读取中…')
+      function save(value, done) {
+        post('world-prompt', { text: value }).then(function () { setMsg(done); load() }, function (e) { setMsg('保存失败：' + (e.message || e)) })
+      }
+      return h('div', { className: 'dw-pane' },
+        h(Card, { title: '世界提示词' },
+          h('div', { style: { marginBottom: 8 } }, h('span', { className: 'dw-chip' }, prompt.custom ? '你自己的一份' : '插件自带'), ' ',
+            h('span', { className: 'dw-muted' }, '可用 {{name}} {{partner}} {{homeTitle}} {{roomDir}} {{diaryDir}} {{selfFile}} {{self}} 和 {{#home}}…{{/home}} 等，见 README')),
+          h('textarea', { className: 'dw-code', value: text, onChange: function (e) { setText(e.target.value); setMsg('') } })),
+        h('div', { className: 'dw-bar' },
+          h('button', { className: 'dw-btn primary', disabled: text === prompt.text, onClick: function () { save(text, '已保存。下次开始对话或压缩之后生效。') } }, '保存'),
+          prompt.custom ? h('button', { className: 'dw-btn', onClick: function () { if (window.confirm('删掉你自己的这份，换回插件自带的模板？')) save('', '已换回插件自带的模板。') } }, '恢复默认') : null,
+          h('span', { className: msg.indexOf('失败') >= 0 ? 'dw-bad' : 'dw-muted' }, msg)))
+    }
+
+    /** 今天家里花了多少，和每天的额度（留空不限）。 */
+    function Budget(props) {
+      var budget = props.budget || {}, daily = budget.daily, today = budget.today
+      var spent = today ? today.yuan : 0
+      var draftState = useState(daily == null ? '' : String(daily)), draft = draftState[0], setDraft = draftState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      function save() {
+        var text = String(draft).trim(), value = text === '' ? null : Number(text)
+        if (value !== null && !(value >= 0)) { setMsg('请填一个不小于 0 的数，或留空表示不限'); return }
+        post('budget', { daily: value }).then(function () { setMsg(value === null ? '已改为不限' : '已保存'); if (props.onSaved) props.onSaved() }, function (e) { setMsg('保存失败：' + (e.message || e)) })
+      }
+      var over = daily != null && spent >= daily
+      return h(Card, { title: '今日花费', delay: 240 },
+        h('div', null, h('span', { className: 'dw-big' + (over ? ' dw-bad' : '') }, '¥' + spent.toFixed(2)), h('span', { className: 'dw-muted' }, daily == null ? ' · 不限额' : ' / ¥' + Number(daily).toFixed(2) + ' 每天')),
+        daily != null ? h('div', { className: 'dw-meter' }, h('i', { style: { width: Math.min(100, daily > 0 ? Math.round(spent / daily * 100) : 100) + '%' } })) : null,
+        h('div', { className: 'dw-muted', style: { marginTop: 4 } }, '只算家里；按 DeepSeek 官方价与峰谷时段估算。超过后提醒她一次。'),
+        h('div', { className: 'dw-setting' },
+          h('input', { type: 'text', inputMode: 'decimal', placeholder: '每天额度（元），留空不限', value: draft, onChange: function (e) { setDraft(e.target.value); setMsg('') } }),
+          h('button', { className: 'dw-btn', onClick: save }, '保存')),
+        msg ? h('div', { className: msg.indexOf('失败') >= 0 || msg.indexOf('请填') >= 0 ? 'dw-bad' : 'dw-muted' }, msg) : null)
+    }
+    /** 记忆块带最近几轮：默认 200，下次开始对话或压缩之后生效。 */
+    function Memory(props) {
+      var mem = props.mem, window_ = mem && mem.windowTurns || 200
+      var activeScope = mem && mem.archiveScope || 'workspace'
+      var scopeNames = { home: '仅家会话', workspace: '家所在工作区' }
+      var scopeState = useState(mem && mem.selectedArchiveScope || activeScope), scope = scopeState[0], setScope = scopeState[1]
+      var draftState = useState(String(window_)), draft = draftState[0], setDraft = draftState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      function save() {
+        var text = String(draft).trim(), value = text === '' ? null : Number(text)
+        if (value !== null && !(Number.isInteger(value) && value >= 1)) { setMsg('请填一个不小于 1 的整数，留空恢复默认 200'); return }
+        post('memory', { turns: value }).then(function () { setMsg('已保存。下次开始对话或压缩之后生效。'); if (value === null) setDraft('200'); if (props.onSaved) props.onSaved() }, function (e) { setMsg('保存失败：' + (e.message || e)) })
+      }
+      function saveScope() {
+        post('archive-scope', { scope: scope }).then(function (result) {
+          setMsg(result.restartRequired ? '已保存。请重启 DSH，启动后按新范围和消息时间重建记忆块。' : '归档范围已保存。')
+          if (props.onSaved) props.onSaved()
+        }, function (e) { setMsg('保存失败：' + (e.message || e)) })
+      }
+      return h(Card, { title: '记忆', delay: 180 }, mem ? [
+        h('div', { key: 'm' }, h('span', { className: 'dw-big' }, mem.turns), h('span', { className: 'dw-muted' }, ' / ' + window_ + ' 轮')),
+        h('div', { key: 'b', className: 'dw-meter' }, h('i', { style: { width: Math.min(100, Math.round((mem.turns || 0) / window_ * 100)) + '%' } })),
+        h('div', { key: 'd', className: 'dw-muted' }, '约 ' + mem.approxTokens + ' token · 归档 ' + mem.records + ' 条 · 来自 ' + mem.sessions + ' 个会话'),
+        h('div', { key: 'active', className: 'dw-muted' }, '当前归档：该 agent 的独立会话'),
+        h('div', { key: 's', className: 'dw-setting' },
+          h('input', { type: 'text', inputMode: 'numeric', 'aria-label': '记忆带最近几轮', placeholder: '最近几轮，留空为 200', value: draft, onChange: function (e) { setDraft(e.target.value); setMsg('') } }),
+          h('button', { className: 'dw-btn', onClick: save }, '保存')),
+        msg ? h('div', { key: 'x', className: msg.indexOf('失败') >= 0 || msg.indexOf('请填') >= 0 ? 'dw-bad' : 'dw-muted' }, msg) : null,
+      ] : h('div', { className: 'dw-muted' }, '—'))
+    }
+    /** 微信：适配器每约 2 秒来问一次，最近一次来问的时间就是连接状态；两个读取参数在它下次来问时同步。 */
+    function Wechat(props) {
+      var w = props.wechat, zone = props.zone
+      var contextState = useState(String(w.contextMessages)), context = contextState[0], setContext = contextState[1]
+      var bufferState = useState(String(w.bufferSeconds)), buffer = bufferState[0], setBuffer = bufferState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      var age = w.lastContactAt ? Date.now() - new Date(w.lastContactAt).getTime() : null
+      var contacted = age != null && age < 30000, offline = contacted && w.account === 'offline'
+      var ad = w.adapter
+      var blocked = ad && ad.needsHuman
+      var stateText = blocked ? '● 有消息待核对，适配器已停' : !contacted ? (ad && ad.running ? '● 适配器启动中' : ad && ad.error ? '● 等待适配器文件' : w.lastContactAt ? '● 适配器已断开' : '● 等待适配器') : offline ? '● 微信离线，等待重新登录' : '● 已连接'
+      var adMsgState = useState(''), adMsg = adMsgState[0], setAdMsg = adMsgState[1]
+      function restartAdapter() {
+        setAdMsg('正在重启…')
+        post('wechat-adapter', {}).then(function () { setAdMsg('已重启'); if (props.onSaved) props.onSaved() }, function (e) { setAdMsg('重启失败：' + (e.message || e)) })
+      }
+      function save() {
+        var c = String(context).trim() === '' ? null : Number(context), b = String(buffer).trim() === '' ? null : Number(buffer)
+        if (c !== null && !(Number.isInteger(c) && c >= 1 && c <= 20)) { setMsg('请填 1–20 的整数，留空恢复默认 8'); return }
+        if (b !== null && !(b >= 0 && b <= 30)) { setMsg('请填 0–30 秒，留空恢复默认 3'); return }
+        post('wechat', { contextMessages: c, bufferSeconds: b }).then(function () {
+          setMsg('已保存。适配器下次轮询时同步，当前这一批沿用原值。')
+          if (c === null) setContext('8'); if (b === null) setBuffer('3')
+          if (props.onSaved) props.onSaved()
+        }, function (e) { setMsg('保存失败：' + (e.message || e)) })
+      }
+      return h(Card, { title: '微信', delay: 300 },
+        h('div', null, h('span', { className: 'dw-big ' + (contacted && !offline ? 'dw-ok' : 'dw-bad') }, stateText)),
+        KV([
+          ['最近联系', w.lastContactAt ? local(w.lastContactAt, zone) : '—'],
+          ['绑定账号', w.accountId || '—'],
+          ad ? ['适配器', ad.running ? '由插件管理 · 运行中' + (ad.restarts ? '（已重启 ' + ad.restarts + ' 次）' : '') : '由插件管理 · 已退出' + (ad.error ? '：' + ad.error : ad.lastExit ? '（' + ad.lastExit + '），等待重启' : '')] : null,
+          ['聊天', w.accountId ? w.chats + ' 个' : '—'],
+          ['待发送', String(w.pending)],
+          ['待核对', h('span', { className: w.uncertain ? 'dw-bad' : '' }, String(w.uncertain))],
+        ]),
+        w.uncertain ? h('div', { className: 'dw-muted' }, '发送结果不明的消息不会自动重发，请在微信里核对后用适配器 acknowledge 确认。') : null,
+        blocked ? h('div', { className: 'dw-bad' }, '上次有消息处理到一半、结果不明。先在微信里核对是否真的发出，再用适配器的 acknowledge 确认（见适配器 README），然后点下面的重启。') : null,
+        ad ? h('div', { className: 'dw-bar' }, h('button', { className: 'dw-btn', onClick: restartAdapter }, '重启适配器'), adMsg ? h('span', { className: adMsg.indexOf('失败') >= 0 ? 'dw-bad' : 'dw-muted' }, adMsg) : null) : null,
+        h('div', { className: 'dw-setting' },
+          h('input', { type: 'text', inputMode: 'numeric', 'aria-label': '群聊读取上文条数', placeholder: '上文条数，默认 8', value: context, onChange: function (e) { setContext(e.target.value); setMsg('') } }),
+          h('input', { type: 'text', inputMode: 'decimal', 'aria-label': '图片缓冲秒数', placeholder: '缓冲秒数，默认 3', value: buffer, onChange: function (e) { setBuffer(e.target.value); setMsg('') } }),
+          h('button', { className: 'dw-btn', onClick: save }, '保存')),
+        h('div', { className: 'dw-muted' }, '上文按消息条数算（群聊被 @ 时带上之前几条）；缓冲是私聊图片等待后续图片或文字的秒数。与共享记忆的 200 轮无关。'),
+        msg ? h('div', { className: msg.indexOf('失败') >= 0 || msg.indexOf('请填') >= 0 ? 'dw-bad' : 'dw-muted' }, msg) : null)
+    }
+    /** QQ：她自己那条 OneBot 通道（原生），以及 SnowLuma 控制台的入口。 */
+    function Qq(props) {
+      var busyState = useState(false), busy = busyState[0], setBusy = busyState[1]
+      var msgState = useState(''), msg = msgState[0], setMsg = msgState[1]
+      // 两个控制台都带 X-Frame-Options: DENY，塞不进 iframe，所以交给系统浏览器开。
+      // 地址和令牌由宿主半侧现给（/dsh-world/qq/console），所以打开就是登录态。
+      function openDoor(kind) {
+        var label = 'SnowLuma'
+        setBusy(true); setMsg('')
+        qqGet('console').then(function (res) {
+          var door = res && res[kind]
+          // 还差密码的门也带着地址，先认这件事，别把登录页当成品打开。
+          if (door && door.needs === 'password') { if (props.onNeedPassword) props.onNeedPassword(kind); return null }
+          if (door && door.url) {
+            return qqPost('open', { kind: kind }).then(function (r) {
+              setMsg(r && r.opened ? '已在浏览器打开 ' + label + ' 控制台' : '失败：' + ((r && r.error) || '打不开'))
+            })
+          }
+          setMsg('失败：' + ((door && door.error) || '宿主没给地址'))
+          return null
+        }, function (e) { setMsg('失败：' + ((e && e.message) || e)) }).then(function () { setBusy(false) })
+      }
+      // 阳台：拨端口就是开关（0 是关）。
+      function flipBridge(port) {
+        setBusy(true); setMsg('')
+        qqPost('native', { bridge: { port: port } }).then(function () {
+          setMsg('')
+          if (props.onSaved) props.onSaved()
+        }, function (e) { setMsg('失败：' + ((e && e.message) || e)) }).then(function () { setBusy(false) })
+      }
+      function flipNative(autoReply) {
+        setBusy(true); setMsg('')
+        qqPost('native', { autoReply: autoReply }).then(function () {
+          setMsg('')
+          if (props.onSaved) props.onSaved()
+        }, function (e) { setMsg('失败：' + ((e && e.message) || e)) }).then(function () { setBusy(false) })
+      }
+      function copyLine(text) {
+        if (!text) { setMsg('这条命令还没生出来'); return }
+        if (!navigator.clipboard) { setMsg('这个浏览器不给复制，自己选上面那行'); return }
+        navigator.clipboard.writeText(text).then(function () { setMsg('命令已复制') }, function () { setMsg('复制失败，自己选上面那行') })
+      }
+      return h(Card, { title: 'QQ', delay: 240 }, [
+        props.native ? (function (n) {
+          if (!n) return h('div', { key: 'n', className: 'dw-muted' }, '她自己的通道：没开')
+          return h('div', { key: 'n' }, [
+            h('span', { key: 'a', className: n.connected ? 'dw-ok' : 'dw-muted' }, n.connected ? '● 她自己连着 ' + n.url : '● 她自己的通道没连上'),
+            h('span', { key: 'b', className: 'dw-muted' }, ' · 收 ' + (n.conversations || 0) + ' 个会话 · 发 ' + (n.sent || 0) + ' 条' + (n.failed ? ' · 失败 ' + n.failed : '') + (n.blocked ? ' · 挡下 ' + n.blocked : '') + (n.autoReply ? ' · 会自己回' : ' · 只看不回')),
+            n.lastError ? h('span', { key: 'c', className: 'dw-bad' }, ' · ' + n.lastError) : null,
+          ])
+        })(props.native) : h('div', { key: 'n', className: 'dw-muted' }, '她自己的通道：没开（配置里 qqNative.enabled）'),
+        (function (n) {
+          if (!n) return null
+          return h('label', { key: 'nt', className: 'dw-setting', style: { cursor: 'pointer' } }, [
+            h('input', { key: 'c', type: 'checkbox', checked: n.autoReply === true, disabled: busy,
+              onChange: function (e) { flipNative(e.target.checked) } }),
+            h('span', { key: 't' }, n.autoReply === true ? ' 会自己回话' : ' 只看不回'),
+          ])
+        })(props.native),
+        (function (n) {
+          if (!n) return null
+          var b = n.bridge
+          if (!b) return h('div', { key: 'nb', className: 'dw-setting' }, [
+            h('span', { key: 's', className: 'dw-muted' }, '阳台：关着（要用就在这儿打开）'),
+            h('button', { key: 'b', className: 'dw-btn', disabled: busy, onClick: function () { flipBridge(3210) } }, '开这条线（3210）'),
+          ])
+          return h('div', { key: 'nb' }, [
+            h('div', { key: 'l', className: 'dw-muted' },
+              h('span', { className: b.serving ? 'dw-ok' : 'dw-muted' }, b.serving ? '● 阳台开着 ' + (b.url || '') : '● 阳台关着'),
+              ' · ' + ((b.lines || 0) ? '连着 ' + b.lines + ' 条线' : '还没人敲门')
+                + ' · 收了 ' + (b.received || 0) + ' 句、回了 ' + (b.relayed || 0) + ' 句、她开口 ' + (b.spoken || 0) + ' 次'),
+            b.lastError ? h('div', { key: 'e', className: 'dw-bad' }, ' · ' + b.lastError) : null,
+            h('div', { key: 'c', className: 'dw-muted', style: { wordBreak: 'break-all', fontSize: 12 } }, b.line || ''),
+            h('div', { key: 'y', className: 'dw-setting' }, [
+              h('button', { key: 'c', className: 'dw-btn', disabled: busy, onClick: function () { copyLine(b.line) } }, '复制这条命令'),
+              h('button', { key: 'x', className: 'dw-btn', disabled: busy, onClick: function () { flipBridge(0) } }, '关掉这条线'),
+            ]),
+          ])
+        })(props.native),
+        h('div', { key: 'k', className: 'dw-setting' },
+          h('button', { className: 'dw-btn', disabled: busy, onClick: function () { openDoor('snowluma') } }, '打开 SnowLuma 控制台')),
+        h('div', { key: 'b', className: 'dw-setting' },
+          h('button', { className: 'dw-btn', disabled: busy, onClick: function () { if (props.onSaved) props.onSaved() } }, '刷新')),
+        msg ? h('div', { key: 'x', className: msg.indexOf('失败') >= 0 ? 'dw-bad' : 'dw-muted' }, msg) : null,
+      ])
+    }
+    /**
+     * 第一次打开 SnowLuma 控制台时，得先用面板密码换一个会话令牌：那令牌只活在那边的进程内存里，重启就没了。
+     * 密码不在浏览器里存着，填完就交给宿主半侧，换到令牌后由宿主把系统浏览器拉起来。
+     * 两个控制台都发 X-Frame-Options: DENY，塞不进 iframe，所以只能这样开。
+     */
+    function Panel(props) {
+      var passState = useState(''), pass = passState[0], setPass = passState[1]
+      var busyState = useState(false), busy = busyState[0], setBusy = busyState[1]
+      var errState = useState(''), err = errState[0], setErr = errState[1]
+      function signIn() {
+        if (!pass) { setErr('先填密码'); return }
+        setBusy(true); setErr('')
+        qqPost('panel-password', { password: pass }).then(function (body) {
+          var next = body && body.snowluma
+          if (!next || !next.url) { setErr((next && next.error) || '登录失败'); return null }
+          setPass('')
+          return qqPost('open', { kind: 'snowluma' }).then(function (r) {
+            if (r && r.opened) { if (props.onClose) props.onClose() } else setErr((r && r.error) || '打不开浏览器')
+          })
+        }, function (e) { setErr(String((e && e.message) || e)) }).then(function () { setBusy(false) })
+      }
+      return h('div', { style: { position: 'fixed', left: 0, top: 0, width: '100%', height: '100%', zIndex: 60, background: 'rgba(10,14,20,.66)', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+        h('div', { style: { width: 480, maxWidth: '92%', background: '#141b25', border: '1px solid rgba(255,255,255,.1)', borderRadius: 12, padding: 20, boxSizing: 'border-box' } },
+          h('h3', { style: { margin: '0 0 8px', color: '#e8edf4' } }, '第一次打开 SnowLuma 控制台'),
+          h('div', { className: 'dw-muted', style: { marginBottom: 16, lineHeight: 1.6 } }, '它只认密码、没有账号名这回事；会话令牌只存在进程内存里，过期就没了，所以要用面板密码换一次。密码留在你这台机器上，不会回传浏览器。'),
+          h('label', { style: { display: 'block', marginBottom: 16, color: '#c7d2de' } }, '密码 ',
+            h('input', { type: 'password', value: pass, onChange: function (e) { setPass(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') signIn() }, style: { width: 220 } })),
+          err ? h('div', { className: 'dw-bad', style: { marginBottom: 12 } }, '● ' + err) : null,
+          h('button', { className: 'dw-btn', disabled: busy, onClick: signIn }, busy ? '……' : '登录并打开'),
+          h('button', { className: 'dw-btn', style: { marginLeft: 10 }, onClick: function () { if (props.onClose) props.onClose() } }, '取消')))
+    }
+    /** 接入：微信和 QQ 各一个开关。开着才注册微信的发送工具、路由和适配器 / 才由插件管理 QQ 桥；关掉就撤掉，立即生效，状态记在 world.json。 */
+    function Modules(props) {
+      var ss=useState(null),status=ss[0],setStatus=ss[1],es=useState(''),error=es[0],setError=es[1],bs=useState(''),busy=bs[0],setBusy=bs[1];
+      var fileState=useState(''),configFile=fileState[0],setConfigFile=fileState[1];
+      var codeState=useState(''),code=codeState[0],setCode=codeState[1];
+      function load(){return managed('platform/status?id='+encodeURIComponent(activeId)).then(setStatus,function(e){setError(e.message)})}
+      useEffect(function(){var alive=true;load();var timer=setInterval(function(){if(alive)load()},2000);return function(){alive=false;clearInterval(timer)}},[]);
+      function flip(kind){var enabled=!((status&&status[kind])||props.modules[kind]||{}).enabled;setBusy(kind);setError('');managed('platform',{id:activeId,kind:kind,enabled:enabled}).then(function(){return load()}).then(function(){props.onSaved()},function(e){setError(e.message)}).then(function(){setBusy('')})}
+      function selectMode(value){setBusy('wechat');setError('');managed('platform/wechat/mode',{id:activeId,mode:value}).then(load,function(e){setError(e.message)}).then(function(){setBusy('');props.onSaved()})}
+      var labels={needs_selection:'请选择 QQ 窗口',needs_config:'待配置',needs_login:'等待 Windows 微信登录',missing_component:'缺少发送组件',ready:'等待启动角色',connecting:'连接中',needs_review:'有消息待核对',closed:'已关闭',preparing:'准备中',wait:'等待扫码',scaned:'已扫码，请在手机确认',connected:'已连接',expired:'登录已过期',error:'连接失败',reconnecting:'重新连接中',need_verifycode:'请输入手机上的验证码',verify_code_blocked:'验证已暂停',binded_redirect:'已绑定其他实例',waiting_qq:'等待 QQ 扫码',unsupported:'QQ 版本暂不支持'};
+      return h(Card,{title:'接入'},['wechat','qq'].map(function(kind){var info=(status&&status[kind])||{status:'closed'},enabled=((status&&status[kind])||props.modules[kind]||{}).enabled;
+        return h('div',{key:kind},kind==='wechat'?h('select',{'aria-label':'微信连接方式',value:info.mode||'ilink',disabled:busy==='wechat',onChange:function(e){selectMode(e.target.value)}},h('option',{value:'ilink'},'官方 ClawBot 私聊'),h('option',{value:'windows'},'Windows 微信')):null,h('div',{className:'dw-setting'},h('b',null,kind==='wechat'?'微信':'QQ'),h('button',{className:'dw-btn',disabled:busy===kind,onClick:function(){flip(kind)}},busy===kind?'准备中…':enabled?'关闭':'开启'),h('span',null,enabled||kind==='qq'&&info.status==='needs_selection'||kind==='wechat'&&info.mode==='windows'?(labels[info.status]||'已关闭'):'已关闭')),
+          kind==='qq'&&!enabled&&info.processes&&info.processes.length>1?h('select',{'aria-label':'QQ连接窗口',value:info.selectedPid||'',onChange:function(e){var candidate=info.processes.find(function(p){return String(p.pid)===e.target.value});if(candidate){setBusy('qq');managed('platform/qq/select',{id:activeId,pid:candidate.pid,startedAt:candidate.startedAt}).then(load,function(e){setError(e.message)}).then(function(){setBusy('')})}}},h('option',{value:''},'选择 QQ 窗口'),info.processes.map(function(p){return h('option',{key:p.pid,value:p.pid},(p.visible?'当前窗口':'后台实例')+'（'+p.pid+'）')})):null,
+          kind==='wechat'&&info.mode==='windows'?h('div',null,
+            h('button',{className:'dw-btn',onClick:function(){managed('platform/wechat/windows/login',{id:activeId}).catch(function(e){setError(e.message)})}},'打开微信登录'),
+            h('details',null,h('summary',null,'连接设置'),h('input',{value:configFile,onChange:function(e){setConfigFile(e.target.value)},placeholder:info.configFile||'Windows 微信连接配置文件','aria-label':'Windows 微信连接配置文件'}),h('button',{className:'dw-btn',disabled:busy==='wechat',onClick:function(){setBusy('wechat');managed('platform/wechat/windows/config',{id:activeId,file:configFile}).then(load,function(e){setError(e.message)}).then(function(){setBusy('');props.onSaved()})}},'保存配置'))):null,
+          enabled&&info.qrImage?h('img',{src:info.qrImage,alt:(kind==='wechat'?'微信':'QQ')+'登录二维码',style:{width:220,height:220,background:'#fff',borderRadius:8}}):null,
+          enabled&&info.status==='expired'&&kind==='wechat'?h('button',{className:'dw-btn',onClick:function(){managed('platform/wechat/refresh',{id:activeId}).then(load)}},'刷新二维码'):null,
+          enabled&&info.status==='need_verifycode'?h('div',null,h('input',{value:code,onChange:function(e){setCode(e.target.value)},placeholder:'手机验证码'}),h('button',{className:'dw-btn',onClick:function(){managed('platform/wechat/verify',{id:activeId,code:code}).then(load)}},'确认')):null,
+          (enabled||kind==='wechat'&&info.mode==='windows')&&info.error?h('div',{className:'dw-bad'},info.error):null);
+      }),error?h('div',{className:'dw-bad'},error):null)
+    }
+    function Overview(props) {
+      var snap = props.snap, zone = snap.timeZone, life = snap.life, alarm = life && life.alarm, mem = snap.memory
+      var health = list(snap.health), wakes = life ? list(life.recentWakes) : []
+      var welcome = !snap.running && !life
+      return h('div', { className: 'dw-pane' },
+        welcome ? h(Card, null, h('div', {className:'dw-welcome'}, '填写名字和她是谁，然后开始。')) : null,
+        life ? h('div', { className: 'dw-grid' },
+          h(Card, { title: '此刻', delay: 0 },
+            h('div', { className: 'dw-big' }, statusLabel[life.status] || life.status),
+            alarm ? h('div', { style: { marginTop: 8 } }, h('span', { className: 'dw-muted' }, (sourceLabel[alarm.source] || '闹钟') + ' · '), local(alarm.at, zone), h('span', { className: 'dw-muted' }, '（还有 ' + remaining(alarm.at) + '）')) : h('div', { className: 'dw-muted' }, '没有待定的闹钟'),
+            alarm && alarm.note ? h('blockquote', { className: 'dw-quote' }, alarm.note) : null),
+          h(Card, { title: '家', delay: 60 }, KV([
+            ['会话', String(life.homeSessionId || '还没有家').replace(/^session-/, '').slice(0, 8)],
+            ['下次回顾', life.review ? local(life.review.at, zone) : '—'],
+            ['最近', wakes.length ? h('div', { className: 'dw-trail' }, wakes.map(function (w, i) { return h('span', { key: i }, local(w.deliveredAt, zone) + ' ' + (sourceLabel[w.source] || w.source) + (w.lateMs >= 120000 ? ' · 晚 ' + Math.round(w.lateMs / 60000) + ' 分' : '')) })) : '—'],
+          ]))) : null,
+        h('div', { className: 'dw-grid' },
+          snap.modules ? h(Modules, { modules: snap.modules, running: snap.running, onSaved: props.refresh }) : null,
+          null))
+    }
+    function Records(props) { var snap=props.snap; return h('div',{className:'dw-pane'},h(Activity,{days:list(snap.activityDays),zone:snap.timeZone,tick:props.tick}),h(Diary,{dates:list(snap.diaryDates)})); }
+
+    var cell = { padding: '4px 10px 4px 0', whiteSpace: 'nowrap' }
+    var num = function (v) { return typeof v === 'number' && isFinite(v) ? String(Math.round(v)) : '—' }
+    var pct = function (a, b) { return b > 0 ? Math.round((a / b) * 100) + '%' : '—' }
+
+
+    var TABS = [['overview', '概览'], ['persona', '人设'], ['records', '记录']]
+    /** 一份快照的画面；life 为 null（停着，或生活线没能启动）或缺了哪一块都不会崩。 */
+    function View(props) {
+      var snap = props.snap, error = props.error
+      var tabState = useState('overview'), tab = tabState[0], setTab = tabState[1]
+      var panelState = useState(null), panel = panelState[0], setPanel = panelState[1]
+      var busyState = useState(false), busy = busyState[0], setBusy = busyState[1]
+      var failState = useState(null), fail = failState[0], setFail = failState[1]
+      var running = snap.running === true
+      var name = snap.name && snap.name !== 'TA' ? snap.name : ''
+      function power() {
+        if (running && !window.confirm('停止后，她不会再被叫醒，记忆块、人设和世界提示词都会撤下，这段时间的对话也不记。要停止吗？')) return
+        setBusy(true); setFail(null)
+        post(running ? 'stop' : 'start').then(function () { props.refresh() }, function (e) { setFail(String(e.message || e)) }).then(function () { setBusy(false) })
+      }
+      return h('div', { className: 'dw' },
+        h('header', { className: 'dw-head' + (running ? ' dw-on' : '') },
+          h('div', { className: 'dw-title' },
+            h('h2', null, (name || '她') + '的世界'),
+            h('div', { className: 'dw-state' }, h('i', { className: 'dw-dot' }), running ? '运行中' : '已停止', ' · ', local(snap.now, snap.timeZone),
+              error ? h('span', { className: 'dw-bad' }, ' · 刷新失败：' + error) : null,
+              fail ? h('span', { className: 'dw-bad' }, ' · ' + fail) : null)),
+          h('button', { className: 'dw-power' + (running ? ' stop' : ''), disabled: busy, onClick: power }, busy ? '……' : running ? '停止' : '开始')),
+        h('nav', { className: 'dw-tabs' }, TABS.map(function (t) { return h('button', { key: t[0], className: 'dw-tab' + (tab === t[0] ? ' on' : ''), onClick: function () { setTab(t[0]) } }, t[1]) })),
+        tab === 'overview' ? h(Overview, { snap: snap, refresh: props.refresh, onNeedPassword: setPanel }) : null,
+        tab === 'persona' ? h(PersonaEditor, { onSaved: props.refresh }) : null,
+        tab === 'prompt' ? h(PromptEditor) : null,
+        tab === 'records' ? h(Records, { snap: snap, tick: props.tick }) : null,
+          panel ? h(Panel, { kind: panel, onClose: function () { setPanel(null) } }) : null)
+    }
+
+    function Console() {
+      var snapState = useState(null), snap = snapState[0], setSnap = snapState[1]
+      var errorState = useState(null), error = errorState[0], setError = errorState[1]
+      var offState = useState(false), off = offState[0], setOff = offState[1]
+      var tickState = useState(0), tick = tickState[0], setTick = tickState[1]
+      var loadRef = useRef(null)
+      useEffect(function () {
+        ensureStyle()
+        var alive = true, pending = false, timer = null
+        function load() {
+          if (!alive || pending) return
+          pending = true
+          loadSnapshot().then(function (s) {
+            pending = false
+            if (!alive) return
+            if (s === null) { setOff(true); if (timer) { clearInterval(timer); timer = null } return }
+            setSnap(s); setError(null); setTick(function (t) { return t + 1 })
+          }, function (e) {
+            pending = false
+            if (alive) setError(String((e && e.message) || e))
+          })
+        }
+        function onVisible() { if (document.visibilityState === 'visible') load() }
+        loadRef.current = load
+        load()
+        timer = setInterval(onVisible, 10000)
+        document.addEventListener('visibilitychange', onVisible)
+        return function () { alive = false; loadRef.current = null; if (timer) clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
+      }, [])
+      if (off) return h('div', { className: 'dw' }, h('div', { className: 'dw-muted' }, '世界控制台需要桌面版宿主'))
+      if (!snap) return h('div', { className: 'dw' }, error ? h('div', { className: 'dw-bad' }, '读取失败：' + error) : h('div', { className: 'dw-muted' }, '读取中…'))
+      return h(View, { snap: snap, error: error, tick: tick, refresh: function () { if (loadRef.current) loadRef.current() } })
+    }
+
+    function managed(path, data) {
+      return fetch('/roleplay/api/' + path, data === undefined ? {cache:'no-store'} : {method:'POST',headers:{'content-type':'application/json','x-roleplay':'1'},body:JSON.stringify(data)}).then(settle)
+    }
+    function Manager() {
+      var ss=useState(null), state=ss[0], setState=ss[1]
+      var as=useState(sessionStorage.getItem('roleplay-agent')||''), chosen=as[0], choose=as[1]
+      var es=useState(''), error=es[0], setError=es[1]
+      var ns=useState(''), name=ns[0], setName=ns[1]
+      var cs=useState(''), copy=cs[0], setCopy=cs[1]
+      var ls=useState(''), limit=ls[0], setLimit=ls[1]
+      var is=useState(''), path=is[0], setPath=is[1]
+      function load(){return managed('state').then(function(v){setState(v);if(!chosen && v.agents.length)choose(v.agents[0].id)},function(e){setError(e.message)})}
+      useEffect(function(){ensureStyle();load();var t=setInterval(load,10000);return function(){clearInterval(t)}},[chosen])
+      function act(path,data){setError('');return managed(path,data).then(function(result){load();return result},function(e){setError(e.message)})}
+      var agent=state && state.agents.find(function(a){return a.id===chosen})
+      activeId=agent?agent.id:''
+      return h('div',{className:'dw dw-manager'},
+        h(Card,{title:'角色管理'},
+          h('select',{value:chosen,onChange:function(e){choose(e.target.value);sessionStorage.setItem('roleplay-agent',e.target.value)}},
+            h('option',{value:''},'选择角色'),state?state.agents.map(function(a){return h('option',{key:a.id,value:a.id},a.name)}):null),
+          agent?h('button',{className:'dw-btn',onClick:function(){if(window.confirm('删除角色「'+agent.name+'」？资料会保留，可在已删除角色中恢复。'))act('agents/delete',{id:agent.id,version:agent.version}).then(function(){choose('')})}},'删除角色'):null,
+          state&&state.deleted&&state.deleted.length?h('details',null,h('summary',null,'已删除角色'),state.deleted.map(function(a){return h('div',{key:a.id},a.name,h('button',{className:'dw-btn',onClick:function(){act('agents/restore',{id:a.id}).then(function(r){if(r)choose(r.id)})}},'恢复'))})):null,
+          h('input',{value:name,placeholder:'新角色名称',onChange:function(e){setName(e.target.value)}}),
+          h('select',{value:copy,onChange:function(e){setCopy(e.target.value)}},h('option',{value:''},'空白经历 · 默认预设'),state?state.agents.map(function(a){return h('option',{key:a.id,value:a.id},'复制配置：'+a.name)}):null),
+          h('button',{className:'dw-btn',onClick:function(){act('agents',{name:name,copyConfigFrom:copy||undefined}).then(function(a){if(a){choose(a.id);setName('')}})}},'新建角色'),
+          agent?h('label',null,h('input',{type:'checkbox',checked:agent.config.emotion,onChange:function(e){var c=JSON.parse(JSON.stringify(agent.config));c.emotion=e.target.checked;act('config',{id:agent.id,version:agent.version,config:c})}}),' Emotion Engine（'+(agent.config.emotion?'开启':'关闭')+'）'):null),
+        h(Card,{title:'每日模型预算'},
+          state?h('div',null,'今日可用 ¥'+Math.max(0,state.available).toFixed(4)+' / ¥'+Number(state.budget).toFixed(2)):null,
+          state?h('div',null,'每天凌晨 1 点刷新'):null,
+          h('input',{type:'number',min:0,step:'0.01',value:limit,placeholder:'每日预算（元）','aria-label':'每日预算（元）',onChange:function(e){setLimit(e.target.value)}}),
+          h('button',{className:'dw-btn',onClick:function(){act('limit',{yuan:Number(limit)})}},'保存预算'),
+          state?state.usage.map(function(u){var a=state.agents.find(function(a){return a.id===u.agent});return h('div',{key:u.agent,className:'dw-muted'},(a?a.name:'宿主辅助调用')+'：¥'+Number(u.yuan).toFixed(4))}):null),
+        agent&&state.tasks&&state.tasks.some(function(t){return t.agent===agent.id&&['pending','paused','uncertain','running'].indexOf(t.status)>=0})?h(Card,{title:'日程'},state.tasks.filter(function(t){return t.agent===agent.id&&['pending','paused','uncertain','running'].indexOf(t.status)>=0}).map(function(t){return h('div',{key:t.id,className:'dw-quote'},t.note+' · '+local(t.at)+' · '+({pending:'待唤起',paused:'已暂停',uncertain:'待核对',running:'正在活动'}[t.status]))})):null,
+        agent?h(Card,{title:'资料迁移'},
+          h('button',{className:'dw-btn',disabled:!agent.paused,onClick:function(){act('export',{id:agent.id}).then(function(r){if(r)setError('已导出：'+r.path)})}},'导出已停止角色'),
+          h('input',{value:path,placeholder:'要导入的快照目录',onChange:function(e){setPath(e.target.value)}}),
+          h('button',{className:'dw-btn',onClick:function(){act('import',{path:path,name:name||'导入角色'}).then(function(a){if(a)choose(a.id)})}},'导入为新角色')):null,
+        error?h('div',{className:'dw-bad',role:'alert'},error):null,
+        state&&state.faults&&chosen&&state.faults[chosen]?h('div',{className:'dw-bad'},state.faults[chosen]):null,
+        agent?h(Console,{key:agent.id}):h('div',{className:'dw-muted'},'创建角色后即可编辑人设与启动。'))
+    }
+    var exports = { inject: ['slots'] }
+    Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
+    exports.apply = function (ctx) {
+      ctx.slots.inject('settings.section', function () {
+        return ctx.slots.register({ name: 'settings.section', id: 'world-console', order: 28, label: '世界控制台' }, function () { return h(Manager) })
+      })
+    }
+    Object.defineProperty(exports, '__test', { value: { Modules: Modules, Wechat: Wechat, Activity: Activity, Diary: Diary, Qq: Qq, Panel: Panel, View: View, Overview: Overview, PersonaEditor: PersonaEditor, PromptEditor: PromptEditor, loadSnapshot: loadSnapshot, renderPersona: renderPersona }, enumerable: false })
+    return exports
+  },
+})

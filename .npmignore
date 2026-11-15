@@ -1,0 +1,10 @@
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/*.map
+**/tests
+**/test
+**/.git*
+**/.env*
+**/*.sqlite*
+**/client.json

@@ -1,0 +1,12 @@
+node_modules/
+__pycache__/
+*.pyc
+*.log
+*.sqlite*
+*.tgz
+.env*
+.dsh/
+.runtime/
+work/
+client.json
+*.map

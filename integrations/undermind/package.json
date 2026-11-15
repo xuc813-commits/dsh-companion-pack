@@ -1,0 +1,10 @@
+{
+  "name": "undermind-dsh-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local OAuth bridge connecting DeepSeek Harness to Undermind",
+  "type": "module",
+  "dependencies": {
+    "mcp-remote": "0.15.2"
+  }
+}

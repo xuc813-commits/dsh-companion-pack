@@ -1,0 +1,4 @@
+- id: subagent-codex
+  name: '@deepseek-ai/dsh-subagent-codex'
+  config:
+    model: gpt-6-astra

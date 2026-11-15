@@ -1,0 +1,46 @@
+[
+  {
+    "name": "@deepseek-ai/dsh-base",
+    "spec": null
+  },
+  {
+    "name": "@deepseek-ai/dsh-web-app",
+    "spec": null
+  },
+  {
+    "name": "dshmarket",
+    "spec": "dshmarket@1.70.2"
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-auto-review",
+    "spec": null
+  },
+  {
+    "name": "dsh-whale-widget-bowl",
+    "spec": "github:Witherwithwinter/DeepSeek-Balance-Whale-Widget-Bowl#2154a5deb30039f9f5825677b653a825975fcee2"
+  },
+  {
+    "name": "dsh-plugin-wallpaper-engine",
+    "spec": "dsh-plugin-wallpaper-engine@1.4.0"
+  },
+  {
+    "name": "@linxin666/dsh-client-ui-task-board",
+    "spec": "@linxin666/dsh-client-ui-task-board@0.4.11"
+  },
+  {
+    "name": "@linxin666/dsh-client-ui-skill-explorer",
+    "spec": "@linxin666/dsh-client-ui-skill-explorer@0.4.11"
+  },
+  {
+    "name": "@linxin666/dsh-session-archive",
+    "spec": "@linxin666/dsh-session-archive@0.4.11"
+  },
+  {
+    "name": "dsh-see-now",
+    "spec": "dsh-see-now@0.0.6"
+  },
+  {
+    "name": "@deepseek-ai/dsh-subagent-codex",
+    "spec": "@deepseek-ai/dsh-subagent-codex@0.2.1-rc.3"
+  }
+]
